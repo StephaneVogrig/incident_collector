@@ -17,7 +17,7 @@
 #   sauts d'horloge (décalage RTC Windows/Linux de 2 h, resynchronisation NTP).
 # Aucune modification du système : le script ne fait que lire.
 
-VERSION="2.0"
+VERSION="2.1"
 MAX_LINE_LENGTH=400          # longueur max d'une ligne dans le rapport
 NB_BOOTS=8        # nombre de boots récents listés
 MIN_UPTIME_SEC=10     # un boot plus court que ça n'est pas retenu automatiquement
@@ -106,6 +106,53 @@ clean_shutdown() {
     | grep -qiE 'Reached target (System )?(Shutdown|Power-Off|Reboot|Final Step)|Journal stopped|systemd-shutdown\[|Shutting down\.'
 }
 
+# --- Variables du rapport + finalisation (posées TÔT pour que le trap INT couvre toute la collecte) ---
+A_HEURE="non précisé"; A_SYMP="non précisé"; A_ACT="non précisé"; A_PWR="non précisé"; A_BOOT="non précisé"
+DONE=""
+FINAL=""
+
+finalize() {
+  [ -n "$DONE" ] && return
+  DONE=1
+  local base n
+  if isnum "$LASTU"; then
+    base="$(date -d "@$LASTU" '+%Y_%m_%d_incident_linux_%Hh%M')"
+  else
+    base="$(date '+%Y_%m_%d')_incident_linux_heure_inconnue_collecte_$(date '+%Hh%M')"
+  fi
+  FINAL="$OUTDIR/$base.md"; n=2
+  while [ -e "$FINAL" ]; do FINAL="$OUTDIR/${base}_$n.md"; n=$((n+1)); done
+
+  {
+    if isnum "$LASTU"; then
+      echo "# Incident Linux — dernier message journalisé : $(fmt "$LASTU")"
+    else
+      echo "# Incident Linux — heure inconnue (collecte du $(date '+%F %T'))"
+    fi
+    echo
+    echo "> Généré par \`collecte_incident_linux.sh\` v$VERSION (lecture seule). L'heure du nom de fichier est celle du dernier message journalisé du boot gelé : c'est une **borne basse** de l'heure du gel."
+    echo
+    echo "## Renseigné à la main (fin de script)"
+    echo
+    echo "- **Heure à laquelle le gel a été constaté** : $A_HEURE"
+    echo "- **Symptômes** (écran interne, HDMI, clavier, Verr. Maj) : $A_SYMP"
+    echo "- **Activité en cours** : $A_ACT"
+    echo "- **Secteur / batterie au moment du gel** : $A_PWR"
+    echo "- **Démarrage précédent** (arrêt complet / redémarrage / depuis Windows, démarrage rapide ?) : $A_BOOT"
+    if [ -s "$UNREAD" ]; then
+      echo
+      echo "**Non lu (droits root requis)** : $(paste -sd ';' "$UNREAD")"
+    fi
+    echo
+    cat "$SUMMARY" "$BODY"
+  } >"$FINAL"
+  [ -n "$RUN_AS" ] && chown "$RUN_AS": "$FINAL" 2>/dev/null
+}
+
+on_int() { echo; echo "Interrompu : rapport partiel enregistré."; finalize; echo "Rapport : $FINAL"; exit 130; }
+
+trap on_int INT TERM HUP
+
 # =====================================================================
 # 1. Liste des boots et choix du boot gelé
 # =====================================================================
@@ -161,6 +208,18 @@ if isnum "$LASTU" && isnum "$FIRSTU" && isnum "$LASTM" && isnum "$FIRSTM"; then
   ANALYSIS_OK=1
   journalctl -b "$B" --no-pager -o short-monotonic >"$TMP/mono.txt" 2>/dev/null
 
+  # Veille dans ce boot (monotonic)
+  NENTRY=0
+  SLEEPS=$(grep -E 'PM: suspend (entry|exit)' "$TMP/mono.txt")
+  if [ -z "$SLEEPS" ]; then
+    SLEEP_MSG="aucune trace"
+  else
+    NENTRY=$(echo "$SLEEPS" | grep -c 'suspend entry')
+    SLEEP_MSG="${NENTRY} entrée(s) en veille"
+    LE=$(echo "$SLEEPS" | grep 'suspend exit' | tail -1 | sed -nE 's/^\[ *([0-9]+)\..*/\1/p')
+    isnum "$LE" && SLEEP_MSG="$SLEEP_MSG ; dernier réveil $(( (LASTM-LE)/60 )) min avant le dernier message"
+  fi
+
   # Cohérence de l'horloge : durée murale (dernier - premier message) vs durée monotonic
   WALL=$((LASTU-FIRSTU))
   MONO=$((LASTM-FIRSTM))
@@ -182,17 +241,6 @@ if isnum "$LASTU" && isnum "$FIRSTU" && isnum "$LASTM" && isnum "$FIRSTM"; then
     if isnum "$NEXTU"; then
       NEXT_MSG="$(fmt "$NEXTU") (écart avec le dernier message : $(( (NEXTU-LASTU)/60 )) min ; heures murales, à relativiser en cas de saut d'horloge)"
     fi
-  fi
-
-  # Veille dans ce boot (monotonic)
-  SLEEPS=$(grep -E 'PM: suspend (entry|exit)' "$TMP/mono.txt")
-  if [ -z "$SLEEPS" ]; then
-    SLEEP_MSG="aucune trace"
-  else
-    NENTRY=$(echo "$SLEEPS" | grep -c 'suspend entry')
-    LE=$(echo "$SLEEPS" | grep 'suspend exit' | tail -1 | sed -nE 's/^\[ *([0-9]+)\..*/\1/p')
-    SLEEP_MSG="${NENTRY} entrée(s) en veille"
-    isnum "$LE" && SLEEP_MSG="$SLEEP_MSG ; dernier réveil $(( (LASTM-LE)/60 )) min avant le dernier message"
   fi
 
   # Fenêtre de gel via une tâche périodique (geoclue) : si le passage attendu manque, le gel est antérieur
@@ -336,50 +384,6 @@ emit "journalctl -k -b 0 --no-pager | grep -iE 'Speculative Return Stack|Transie
 # =====================================================================
 # 4. Questions, nom de fichier et assemblage
 # =====================================================================
-A_HEURE="non précisé"; A_SYMP="non précisé"; A_ACT="non précisé"; A_PWR="non précisé"; A_BOOT="non précisé"
-DONE=""
-FINAL=""
-
-finalize() {
-  [ -n "$DONE" ] && return
-  DONE=1
-  local base n
-  if isnum "$LASTU"; then
-    base="$(date -d "@$LASTU" '+%Y_%m_%d_incident_linux_%Hh%M')"
-  else
-    base="$(date '+%Y_%m_%d')_incident_linux_heure_inconnue_collecte_$(date '+%Hh%M')"
-  fi
-  FINAL="$OUTDIR/$base.md"; n=2
-  while [ -e "$FINAL" ]; do FINAL="$OUTDIR/${base}_$n.md"; n=$((n+1)); done
-
-  {
-    if isnum "$LASTU"; then
-      echo "# Incident Linux — dernier message journalisé : $(fmt "$LASTU")"
-    else
-      echo "# Incident Linux — heure inconnue (collecte du $(date '+%F %T'))"
-    fi
-    echo
-    echo "> Généré par \`collecte_incident_linux.sh\` v$VERSION (lecture seule). L'heure du nom de fichier est celle du dernier message journalisé du boot gelé : c'est une **borne basse** de l'heure du gel."
-    echo
-    echo "## Renseigné à la main (fin de script)"
-    echo
-    echo "- **Heure à laquelle le gel a été constaté** : $A_HEURE"
-    echo "- **Symptômes** (écran interne, HDMI, clavier, Verr. Maj) : $A_SYMP"
-    echo "- **Activité en cours** : $A_ACT"
-    echo "- **Secteur / batterie au moment du gel** : $A_PWR"
-    echo "- **Démarrage précédent** (arrêt complet / redémarrage / depuis Windows, démarrage rapide ?) : $A_BOOT"
-    if [ -s "$UNREAD" ]; then
-      echo
-      echo "**Non lu (droits root requis)** : $(paste -sd ';' "$UNREAD")"
-    fi
-    echo
-    cat "$SUMMARY" "$BODY"
-  } >"$FINAL"
-  [ -n "$RUN_AS" ] && chown "$RUN_AS": "$FINAL" 2>/dev/null
-}
-
-on_int() { echo; echo "Interrompu : rapport enregistré avec les réponses déjà données."; finalize; echo "Rapport : $FINAL"; exit 130; }
-trap on_int INT
 
 # Résumé console
 echo
