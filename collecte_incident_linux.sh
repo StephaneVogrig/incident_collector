@@ -128,6 +128,87 @@ clean_shutdown() {
     | grep -qiE 'Reached target (System )?(Shutdown|Power-Off|Reboot|Final Step)|Journal stopped|systemd-shutdown\[|Shutting down\.'
 }
 
+
+# --- Inventaire PCI dynamique : GPU et périphériques associés ---
+collect_pci_inventory() {
+  {
+    echo
+    echo "### Inventaire PCI détecté dynamiquement"
+    echo
+    echo "> État relevé au moment de la collecte, après le redémarrage éventuel."
+    echo "> Les états actuels ne prouvent pas l'état du matériel au moment du gel."
+    echo
+
+    if ! command -v lspci >/dev/null 2>&1; then
+      echo "**lspci indisponible** : installer le paquet pciutils pour obtenir les noms et pilotes."
+      echo
+    fi
+
+    if [ ! -d /sys/bus/pci/devices ]; then
+      echo "**/sys/bus/pci/devices indisponible**."
+      echo
+      return
+    fi
+
+    local p bdf class vendor device driver subsystem
+    local runtime control status autosuspend
+    local gpu_count=0 pci_count=0
+
+    for p in /sys/bus/pci/devices/*; do
+      [ -e "$p" ] || continue
+
+      bdf="${p##*/}"
+      class=$(cat "$p/class" 2>/dev/null || echo inconnu)
+      vendor=$(cat "$p/vendor" 2>/dev/null || echo inconnu)
+      device=$(cat "$p/device" 2>/dev/null || echo inconnu)
+      subsystem=$(cat "$p/subsystem_vendor" 2>/dev/null || echo inconnu)
+      driver="non lié"
+
+      if [ -L "$p/driver" ]; then
+        driver=$(basename "$(readlink -f "$p/driver")")
+      fi
+
+      runtime=$(cat "$p/power/runtime_status" 2>/dev/null || echo indisponible)
+      control=$(cat "$p/power/control" 2>/dev/null || echo indisponible)
+      status=$(cat "$p/power_state" 2>/dev/null || echo indisponible)
+      autosuspend=$(cat "$p/power/autosuspend_delay_ms" 2>/dev/null || echo indisponible)
+
+      pci_count=$((pci_count + 1))
+
+      case "$class" in
+        (0x03*)
+          gpu_count=$((gpu_count + 1))
+          echo "#### GPU / contrôleur graphique : $bdf"
+          ;;
+        (*)
+          echo "#### Périphérique PCI : $bdf"
+          ;;
+      esac
+
+      echo "- Classe PCI : $class"
+      echo "- Identifiants vendeur / périphérique : $vendor / $device"
+      echo "- Identifiant vendeur du sous-système : $subsystem"
+      echo "- Pilote lié : $driver"
+      echo "- Runtime PM : $runtime"
+      echo "- Contrôle d'énergie : $control"
+      echo "- État PCI déclaré : $status"
+      echo "- Délai autosuspend (ms) : $autosuspend"
+
+      if command -v lspci >/dev/null 2>&1; then
+        echo
+        echo '~~~text'
+        lspci -Dnnk -s "$bdf" 2>&1 | trunc
+        echo '~~~'
+      fi
+
+      echo
+    done
+
+    echo "**Total :** $pci_count périphérique(s) PCI détecté(s), dont $gpu_count contrôleur(s) graphique(s) selon la classe PCI."
+    echo
+  } >> "$BODY"
+}
+
 # --- Variables du rapport + finalisation (posées TÔT pour que le trap INT couvre toute la collecte) ---
 A_HEURE="non précisé"; A_SYMP="non précisé"; A_ACT="non précisé"; A_PWR="non précisé"; A_BOOT="non précisé"
 DONE=""
@@ -425,14 +506,20 @@ h2 "5. Traces de crash persistantes (pstore, rapports)"
 emit_priv "ls -la /sys/fs/pstore /var/lib/systemd/pstore"
 emit "ls -la /var/crash 2>&1 | tail -n 10"
 
-h2 "6. États d'énergie des périphériques clés (état ACTUEL)"
-for d in 0000:01:00.0 0000:06:00.0 0000:06:00.1; do
-  emit "echo $d; lspci -s ${d#0000:} 2>&1; for a in runtime_status control; do echo \"  \$a: \$(cat /sys/bus/pci/devices/$d/power/\$a 2>/dev/null)\"; done"
-done
-emit "prime-select query 2>&1"
-emit "lsmod | grep -E '^(nvidia|nouveau|amdgpu)' | cut -d' ' -f1 | sort -u"
-emit "nvidia-smi --query-gpu=name,driver_version,pstate,power.draw --format=csv 2>&1"
-emit "grep -rH -iE 'DynamicPowerManagement|NVreg' /etc/modprobe.d /proc/driver/nvidia/params 2>/dev/null"
+h2 "6. Inventaire PCI, GPU et états d'énergie (état ACTUEL)"
+collect_pci_inventory
+
+h2 "6.1. État des pilotes graphiques"
+emit "lsmod | grep -E '^(nvidia|nouveau|amdgpu)' | awk '{print \$1}' | sort -u"
+
+h2 "6.2. Informations NVIDIA (si disponibles)"
+emit "if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi --query-gpu=name,uuid,driver_version,pstate,power.draw --format=csv; else echo 'nvidia-smi indisponible'; fi"
+
+h2 "6.3. Paramètres du pilote NVIDIA"
+emit "grep -rH -iE 'DynamicPowerManagement|NVreg' /etc/modprobe.d /proc/driver/nvidia/params 2>/dev/null || true"
+
+h2 "6.4. Sélection graphique PRIME (si disponible)"
+emit "if command -v prime-select >/dev/null 2>&1; then prime-select query; else echo 'prime-select indisponible'; fi"
 
 h2 "7. C-states et paramètres amdgpu actifs"
 emit 'for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do echo "$(basename $s): $(cat $s/name) lat=$(cat $s/latency)us"; done'
