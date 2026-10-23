@@ -17,15 +17,30 @@
 #   sauts d'horloge (décalage RTC Windows/Linux de 2 h, resynchronisation NTP).
 # Aucune modification du système : le script ne fait que lire.
 
-VERSION="2.1"
-MAX_LINE_LENGTH=400          # longueur max d'une ligne dans le rapport
-NB_BOOTS=8        # nombre de boots récents listés
-MIN_UPTIME_SEC=10     # un boot plus court que ça n'est pas retenu automatiquement
+VERSION="2.2"
+MAX_LINE_LENGTH=400     # longueur max d'une ligne dans le rapport
+NB_BOOTS=8              # nombre de boots récents listés
+MIN_UPTIME_SEC=10       # un boot plus court que ça n'est pas retenu automatiquement
+CLOCK_TOLERANCE_SEC=30  # écart toléré entre durée murale et monotonic (au-delà : signalé)
+ACTIVITY_WINDOW_SEC=300 # fenêtre d'analyse de l'activité avant le dernier message
+HEARTBEAT_MIN_SAMPLES=3 # passages de geoclue nécessaires pour estimer la période
+
+# Rapport et fichiers temporaires lisibles par le seul propriétaire (il contient des données personnelles)
+umask 077
+
+# Locale fixe : évite les séparateurs décimaux et les messages localisés dans les parties analysées
+if locale -a 2>/dev/null | grep -qiE '^c\.utf-?8$'; then export LC_ALL=C.UTF-8; else export LC_ALL=C; fi
+
 ARG_BOOT="${1:-}"
 
 if [ -n "$ARG_BOOT" ] && ! [[ "$ARG_BOOT" =~ ^-?[0-9]+$ ]]; then
   echo "Argument invalide : '$ARG_BOOT' (attendu : un entier, ex. -1)." >&2
   exit 2
+fi
+
+if ! command -v journalctl >/dev/null 2>&1; then
+  echo "journalctl introuvable : ce script exige systemd-journald." >&2
+  exit 1
 fi
 
 # --- Dossier de sortie (gère « sudo bash script.sh » : on écrit chez l'utilisateur) ---
@@ -55,6 +70,13 @@ elif command -v sudo >/dev/null 2>&1 && [ -t 0 ]; then
   if sudo -v; then SUDO="sudo -n"; CAN_PRIV=1; else CAN_PRIV=0; fi
 else
   CAN_PRIV=0
+fi
+
+# --- Droits de lecture du journal : sans root ni groupe adm/systemd-journal/wheel, il est incomplet ---
+JOURNAL_WARN=""
+if [ "$(id -u)" -ne 0 ] && ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qxE 'adm|systemd-journal|wheel'; then
+  JOURNAL_WARN="l'utilisateur n'appartient ni à adm, ni à systemd-journal, ni à wheel : le journal système peut être INCOMPLET ou vide (relancer avec sudo)."
+  echo "ATTENTION : $JOURNAL_WARN" >&2
 fi
 
 # --- Utilitaires ---
@@ -132,6 +154,12 @@ finalize() {
     echo
     echo "> Généré par \`collecte_incident_linux.sh\` v$VERSION (lecture seule). L'heure du nom de fichier est celle du dernier message journalisé du boot gelé : c'est une **borne basse** de l'heure du gel."
     echo
+    echo "> **Confidentialité** : ce rapport peut contenir nom de machine, utilisateurs, adresses IP/MAC, SSID et applications utilisées. Le relire et le caviarder avant tout partage public."
+    if [ -n "$JOURNAL_WARN" ]; then
+      echo
+      echo "> **Attention (droits)** : $JOURNAL_WARN"
+    fi
+    echo
     echo "## Renseigné à la main (fin de script)"
     echo
     echo "- **Heure à laquelle le gel a été constaté** : $A_HEURE"
@@ -146,6 +174,7 @@ finalize() {
     echo
     cat "$SUMMARY" "$BODY"
   } >"$FINAL"
+  chmod 600 "$FINAL" 2>/dev/null
   [ -n "$RUN_AS" ] && chown "$RUN_AS": "$FINAL" 2>/dev/null
 }
 
@@ -208,31 +237,67 @@ if isnum "$LASTU" && isnum "$FIRSTU" && isnum "$LASTM" && isnum "$FIRSTM"; then
   ANALYSIS_OK=1
   journalctl -b "$B" --no-pager -o short-monotonic >"$TMP/mono.txt" 2>/dev/null
 
-  # Veille dans ce boot (monotonic)
-  NENTRY=0
-  SLEEPS=$(grep -E 'PM: suspend (entry|exit)' "$TMP/mono.txt")
-  if [ -z "$SLEEPS" ]; then
+  # Veilles : UN SEUL flux JSON (le mur et le monotonic sont sur la même ligne : pas de désalignement possible).
+  # Format de sortie de pm.txt : « entry|exit <mur_µs> <mono_µs> »
+  journalctl -b "$B" -k -o json --no-pager 2>/dev/null \
+    | grep -E '"MESSAGE" *: *"PM: suspend (entry|exit)' \
+    | awk '
+        function num(re,   s) {
+          if (match($0, re)) { s=substr($0,RSTART,RLENGTH); sub(/^[^:]*: */,"",s); gsub(/[^0-9]/,"",s); return s }
+          return ""
+        }
+        { r=num("\"__REALTIME_TIMESTAMP\" *: *\"[0-9]+\"")
+          m=num("\"__MONOTONIC_TIMESTAMP\" *: *\"[0-9]+\"")
+          k=($0 ~ /PM: suspend entry/) ? "entry" : "exit"
+          if (r!="" && m!="") print k, r, m }' >"$TMP/pm.txt"
+
+  NENTRY=$(grep -c '^entry' "$TMP/pm.txt")
+  SLEEP_TOTAL=0; SLEEP_OPEN=""; : >"$TMP/sleeps.txt"
+  if [ "$NENTRY" -eq 0 ]; then
     SLEEP_MSG="aucune trace"
   else
-    NENTRY=$(echo "$SLEEPS" | grep -c 'suspend entry')
     SLEEP_MSG="${NENTRY} entrée(s) en veille"
-    LE=$(echo "$SLEEPS" | grep 'suspend exit' | tail -1 | sed -nE 's/^\[ *([0-9]+)\..*/\1/p')
+    LE=$(awk '$1=="exit"{m=$3} END{if (m!="") printf "%d\n", m/1000000}' "$TMP/pm.txt")
     isnum "$LE" && SLEEP_MSG="$SLEEP_MSG ; dernier réveil $(( (LASTM-LE)/60 )) min avant le dernier message"
+    # Durée d'une veille = (mur sortie − mur entrée) − (mono sortie − mono entrée)
+    awk '$1=="entry" {er=$2; em=$3; open=1; next}
+         $1=="exit" && open {printf "%d %d\n", int(er/1000000), (($2-er)-($3-em))/1000000+0.5; open=0}
+         END {if (open) print "OPEN", int(er/1000000)}' "$TMP/pm.txt" >"$TMP/sleeps.txt"
+    SLEEP_OPEN=$(awk '$1=="OPEN"{print $2}' "$TMP/sleeps.txt")
+    SLEEP_TOTAL=$(awk '$1!="OPEN"{t+=$2} END{print t+0}' "$TMP/sleeps.txt")
+    SLEEP_MSG="$SLEEP_MSG ; durée cumulée $(dur "$SLEEP_TOTAL")"
+    [ -n "$SLEEP_OPEN" ] && SLEEP_MSG="$SLEEP_MSG ; **dernière entrée en veille ($(fmt "$SLEEP_OPEN")) sans réveil journalisé**"
   fi
 
-  # Cohérence de l'horloge : durée murale (dernier - premier message) vs durée monotonic
+  # Cohérence de l'horloge : écart brut (mur − mono) puis RÉSIDU après déduction des veilles.
+  # Le résidu mesure les sauts d'horloge hors veille (RTC / NTP) ; une veille normale ne déclenche plus d'alerte.
   WALL=$((LASTU-FIRSTU))
   MONO=$((LASTM-FIRSTM))
   DIFF=$((WALL-MONO))
   ADIFF=${DIFF#-}
-  if [ "$ADIFF" -le 120 ]; then
-    CLOCK_MSG="écart faible (${ADIFF} s) entre durée murale et monotone sur la fenêtre journalisée."
-  elif [ "$NENTRY" -gt 0 ]; then
-    CLOCK_MSG="**ÉCART TEMPOREL À EXPLIQUER** : durée murale ${WALL} s contre durée monotone ${MONO} s (écart $(dur "$ADIFF")). Des passages en veille détectés (${NENTRY}) peuvent expliquer tout ou partie de cet écart, sans le prouver."
+  RESID=$((DIFF-SLEEP_TOTAL))
+  ARESID=${RESID#-}
+  RAW="écart brut $(dur "$ADIFF") (mur ${WALL} s, mono ${MONO} s), dont veilles $(dur "$SLEEP_TOTAL")"
+  if [ "$ARESID" -le "$CLOCK_TOLERANCE_SEC" ]; then
+    CLOCK_MSG="cohérente : ${RAW} ; résidu ${RESID} s (tolérance ±${CLOCK_TOLERANCE_SEC} s)."
   else
-    CLOCK_MSG="**ÉCART TEMPOREL À EXPLIQUER** : durée murale ${WALL} s contre durée monotone ${MONO} s (écart $(dur "$ADIFF")). Aucun passage en veille n'a été détecté par le script ; un saut d'horloge est une possibilité, pas une conclusion."
+    if [ "$RESID" -lt 0 ]; then
+      CLOCK_KIND="**HORLOGE MURALE EN ARRIÈRE**"
+      CLOCK_DETAIL="Ni une veille ni la dérive ne produisent un recul : un saut en arrière (RTC / NTP) est la cause typique."
+    else
+      CLOCK_KIND="**AVANCE D'HORLOGE INEXPLIQUÉE**"
+      CLOCK_DETAIL="Après déduction des veilles détectées, la durée murale dépasse la durée monotone : saut en avant (RTC / NTP) ou veille non journalisée."
+    fi
+    CLOCK_HINT=""
+    if [ "$ARESID" -ge 1680 ]; then
+      rem=$((ARESID%1800))
+      if [ "$rem" -le 120 ] || [ "$rem" -ge 1680 ]; then
+        CLOCK_HINT=" Le résidu est proche d'un multiple de 30 min : décalage de fuseau de la RTC (Windows en heure locale / Linux en UTC) probable."
+      fi
+    fi
+    CLOCK_MSG="${CLOCK_KIND} : résidu ${RESID} s (≈ $(dur "$ARESID")) après déduction des veilles (${RAW}). ${CLOCK_DETAIL}${CLOCK_HINT} À confirmer avec \`timedatectl\` et les messages « Time has been changed » / « Synchronized to time server ». Limite : un saut survenu pendant une veille est compté dans la durée de cette veille."
   fi
-  START_EST=$((LASTU-LASTM))
+  START_EST=$((LASTU-LASTM-SLEEP_TOTAL))
 
   # Prochain démarrage
   NEXT_MSG="n/a"
@@ -244,9 +309,9 @@ if isnum "$LASTU" && isnum "$FIRSTU" && isnum "$LASTM" && isnum "$FIRSTM"; then
   fi
 
   # Fenêtre de gel via une tâche périodique (geoclue) : si le passage attendu manque, le gel est antérieur
-  WINDOW_MSG="non déterminable (moins de 3 passages de geoclue)"
-  HB=$(grep -E 'geoclue\[[0-9]+\]: Failed to query location' "$TMP/mono.txt" | sed -nE 's/^\[ *([0-9]+)\..*/\1/p' | tail -5)
-  if [ "$(echo "$HB" | grep -c .)" -ge 3 ]; then
+  WINDOW_MSG="non déterminable (moins de ${HEARTBEAT_MIN_SAMPLES} passages de geoclue)"
+  HB=$(grep -E 'geoclue\[[0-9]+\]: Failed to query location' "$TMP/mono.txt" | sed -nE 's/^\[ *([0-9]+)\..*/\1/p' | tail -n $((HEARTBEAT_MIN_SAMPLES>5 ? HEARTBEAT_MIN_SAMPLES : 5)))
+  if [ "$(echo "$HB" | grep -c .)" -ge "$HEARTBEAT_MIN_SAMPLES" ]; then
     read -r LASTHB PERIOD < <(echo "$HB" | awk 'NR>1{d+=$1-p; k++} {p=$1} END{if(k>0) printf "%d %d\n", p, d/k}')
     if isnum "$LASTHB" && isnum "$PERIOD" && [ "$PERIOD" -gt 0 ]; then
       NEXTHB=$((LASTHB+PERIOD))
@@ -285,11 +350,11 @@ if isnum "$LASTU" && isnum "$FIRSTU" && isnum "$LASTM" && isnum "$FIRSTM"; then
     echo "Pour analyser un autre boot : \`bash collecte_incident_linux.sh -2\` (indice de la première colonne). Les durées de la commande \`last\` ne sont pas fiables en cas de saut d'horloge : se fier à ce tableau."
   } >>"$SUMMARY"
 
-  # Activité dans les 5 dernières minutes AVANT le dernier message (monotonic)
-  THR=$((LASTM-300)); [ "$THR" -lt 0 ] && THR=0
+  # Activité dans les dernières minutes (ACTIVITY_WINDOW_SEC) AVANT le dernier message (monotonic)
+  THR=$((LASTM-ACTIVITY_WINDOW_SEC)); [ "$THR" -lt 0 ] && THR=0
   {
     echo
-    echo "### Activité dans les 5 dernières minutes avant le dernier message"
+    echo "### Activité dans les $((ACTIVITY_WINDOW_SEC/60)) dernières minutes avant le dernier message"
     echo
     echo "Sources de messages (nombre de lignes par processus) :"
     echo
@@ -414,3 +479,4 @@ finalize
 echo
 echo "Terminé. Rapport : $FINAL"
 echo "Pour consulter : less \"$FINAL\""
+echo "Fichier en lecture réservée (600). Il peut contenir des données personnelles : le relire avant tout partage."
