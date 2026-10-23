@@ -17,7 +17,7 @@
 #   sauts d'horloge (décalage RTC Windows/Linux de 2 h, resynchronisation NTP).
 # Aucune modification du système : le script ne fait que lire.
 
-VERSION="2.2"
+VERSION="2.3"
 MAX_LINE_LENGTH=400     # longueur max d'une ligne dans le rapport
 NB_BOOTS=8              # nombre de boots récents listés
 MIN_UPTIME_SEC=10       # un boot plus court que ça n'est pas retenu automatiquement
@@ -495,7 +495,8 @@ emit "journalctl -b $B -n 120 --no-pager -o short-iso"
 
 h2 "4. Lignes suspectes du boot analysé (matériel, graphique, énergie)"
 note "Les lignes Xorg \`(II)\`, \`(==)\`, \`(--)\` et \`Modeline\` sont exclues (bruit) ; \`(EE)\` et \`(WW)\` sont conservées."
-PAT='amdgpu|nvidia|NVRM|Xid|\bdrm\b|snd_hda|\baer\b|pcie|PCIe Bus Error|\bmce\b|machine check|hardware error|lockup|watchdog|power state|D3hot|\brcu|hung task|segfault|\boops\b|panic|BUG:|ACPI (BIOS )?Error|thermal|throttl|atkbd|i8042|\(EE\)|\(WW\)'
+# v2.3 : ajout des suspects classiques de la gamme ROG (GPU « tombé du bus », GSP NVIDIA, NVMe, Wi-Fi, ASUS WMI, i2c_hid, UCSI)
+PAT='amdgpu|nvidia|NVRM|Xid|fell off the bus|\bGSP\b|\bdrm\b|snd_hda|\baer\b|pcie|PCIe Bus Error|\bmce\b|machine check|hardware error|lockup|watchdog|power state|D3hot|\brcu|hung task|segfault|\boops\b|panic|BUG:|ACPI (BIOS )?Error|thermal|throttl|atkbd|i8042|nvme|iwlwifi|mt76|mt79|rtw8|rtw_|ath1[012]k|asus_wmi|asus-nb-wmi|asus_nb_wmi|i2c_hid|\bucsi|\(EE\)|\(WW\)'
 emit "journalctl -b $B --no-pager -o short-iso | grep -vE '\\((II|==|--)\\)|Modeline' | grep -iE '$PAT' | tail -n 80"
 emit "journalctl -k -b $B -p warning --no-pager -o short-iso | tail -n 40"
 emit "journalctl -b $B -p err --no-pager -o short-iso | tail -n 60"
@@ -524,7 +525,34 @@ emit "if command -v prime-select >/dev/null 2>&1; then prime-select query; else 
 h2 "7. C-states et paramètres amdgpu actifs"
 emit 'for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do echo "$(basename $s): $(cat $s/name) lat=$(cat $s/latency)us"; done'
 emit 'for p in runpm dcdebugmask ppfeaturemask sg_display; do echo "amdgpu.$p = $(cat /sys/module/amdgpu/parameters/$p 2>/dev/null)"; done'
-emit "grep -iE 'processor.max_cstate|amdgpu|nvidia|tsc' /etc/default/grub"
+emit "grep -iE 'processor.max_cstate|amdgpu|nvidia|tsc|amd_pstate|nvme_core|pcie_aspm' /etc/default/grub"
+
+h2 "7.1. Pilote de fréquence CPU (amd_pstate / cpufreq) et profil de plateforme"
+note "Valeurs ACTUELLES (après redémarrage). \`amd_pstate\` en mode \`active\`/\`guided\` et le profil de plateforme ASUS modifient la gestion d'énergie du CPU ; à comparer avec la ligne de commande noyau (section 1)."
+emit 'echo "amd_pstate/status = $(cat /sys/devices/system/cpu/amd_pstate/status 2>/dev/null || echo indisponible)"'
+emit 'for f in /sys/module/amd_pstate/parameters/*; do [ -e "$f" ] && echo "amd_pstate.$(basename $f) = $(cat $f 2>/dev/null)"; done; true'
+emit 'echo "scaling_driver = $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null || echo indisponible)"; echo "scaling_governor = $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo indisponible)"; echo "energy_performance_preference = $(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null || echo indisponible)"; echo "scaling_available_governors = $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null || echo indisponible)"; echo "boost = $(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo indisponible)"'
+emit 'echo "platform_profile = $(cat /sys/firmware/acpi/platform_profile 2>/dev/null || echo indisponible)"; echo "platform_profile_choices = $(cat /sys/firmware/acpi/platform_profile_choices 2>/dev/null || echo indisponible)"'
+emit "if command -v powerprofilesctl >/dev/null 2>&1; then powerprofilesctl get; else echo 'powerprofilesctl indisponible'; fi"
+emit "if command -v tuned-adm >/dev/null 2>&1; then tuned-adm active; fi; if command -v tlp-stat >/dev/null 2>&1; then echo 'TLP présent (tlp-stat disponible)'; fi; true"
+
+h2 "7.2. SSD NVMe : APST et états d'énergie (état ACTUEL)"
+note "L'APST (Autonomous Power State Transition) pilote la mise en veille profonde du SSD ; un SSD qui ne se réveille pas est une cause classique de gel net, sans trace dans le journal. Paramètre noyau de contournement : \`nvme_core.default_ps_max_latency_us\` (0 = APST désactivé)."
+emit 'echo "nvme_core.default_ps_max_latency_us = $(cat /sys/module/nvme_core/parameters/default_ps_max_latency_us 2>/dev/null || echo indisponible)"'
+emit 'for n in /sys/class/nvme/nvme*; do [ -e "$n" ] || continue; echo "$(basename $n): model=$(cat $n/model 2>/dev/null | sed "s/ *$//") fw=$(cat $n/firmware_rev 2>/dev/null) state=$(cat $n/state 2>/dev/null) transport=$(cat $n/transport 2>/dev/null) address=$(cat $n/address 2>/dev/null)"; done; ls /sys/class/nvme/nvme* >/dev/null 2>&1 || echo "aucun périphérique NVMe détecté"'
+if command -v nvme >/dev/null 2>&1; then
+  note "Lecture APST via \`nvme-cli\` (root requis) : fonction 0x0c = Autonomous Power State Transition, 0x02 = Power Management."
+  for d in /dev/nvme[0-9]*; do
+    case "$d" in (*n[0-9]*|*p[0-9]*) continue ;; esac
+    [ -e "$d" ] || continue
+    emit_priv "nvme get-feature $d -f 0x0c -H"
+    emit_priv "nvme get-feature $d -f 0x02 -H"
+    emit_priv "nvme id-ctrl $d | grep -E '^(mn|fr|npss|apsta|wctemp|cctemp) '"
+  done
+else
+  note "**nvme-cli indisponible** : installer le paquet \`nvme-cli\` pour lire l'état APST du contrôleur (\`sudo apt install nvme-cli\`)."
+fi
+emit "journalctl -k -b $B --no-pager -o short-iso | grep -iE 'nvme' | tail -n 30"
 
 h2 "8. Firmware et microcode"
 emit "echo \"BIOS : \$(cat /sys/class/dmi/id/bios_version) (\$(cat /sys/class/dmi/id/bios_date))\""
