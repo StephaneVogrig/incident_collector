@@ -1,11 +1,11 @@
 ﻿<#
- collecte_incident.ps1 — Collecte en LECTURE SEULE des informations post-crash.
+ collecte_incident_windows.ps1 — Collecte en LECTURE SEULE des informations post-crash.
  Seule écriture : le rapport (et la copie des dernières lignes HWiNFO) dans Documents\Incidents.
  À lancer juste après le redémarrage consécutif au crash, avant tout nouveau redémarrage.
  Idéalement dans un PowerShell « Exécuter en tant qu'administrateur » (accès à LiveKernelReports).
 
  Lancement sans modifier la stratégie d'exécution :
-   powershell -ExecutionPolicy Bypass -File .\collecte_incident.ps1
+   powershell -ExecutionPolicy Bypass -File .\collecte_incident_windows.ps1
 #>
 param(
     [string]$HwinfoDir = (Join-Path $env:USERPROFILE 'Documents'),
