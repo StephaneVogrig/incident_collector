@@ -9,8 +9,7 @@
 
 set -euo pipefail
 
-STATE_DIR="/tmp/syscfg-sandbox/state"
-# STATE_DIR="/var/lib/syscfg"
+STATE_DIR="/var/lib/syscfg"
 BACKUP_FILE="$STATE_DIR/backup.env"
 
 # Format : "NOM_LOGIQUE|/chemin/dans/sys|valeur_test"
@@ -18,6 +17,17 @@ TARGETS=(
     "TEST_MODE    | /tmp/syscfg-sandbox/mode    | manual"
     "TEST_PROFILE | /tmp/syscfg-sandbox/profile | performance"
 )
+
+declare -A SAVED=()
+
+load_backup() {
+    local key val
+    SAVED=()
+    while IFS='=' read -r key val || [[ -n "$key" ]]; do
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        SAVED["$key"]="$val"
+    done < "$BACKUP_FILE"
+}
 
 die() {
     echo "Erreur : $*" >&2
@@ -76,16 +86,7 @@ save_backup() {
     tmp_file="$(mktemp "$STATE_DIR/.baseline.XXXXXX")"
     chmod 0600 "$tmp_file"
 
-    local entry name path test_val val
-    for entry in "${TARGETS[@]}"; do
-        IFS='|' read -r name path test_val <<< "$entry"
-        if [[ -r "$path" ]]; then
-            val="$(read_sysfs_value "$path")"
-            printf '%s=%q\n' "$name" "$val" >> "$tmp_file"
-        else
-            echo "Avertissement : $name ($path) introuvable ou non lisible, ignoré." >&2
-        fi
-    done
+    for_each_target _save_on_target
 
     mv -f "$tmp_file" "$BACKUP_FILE"
     echo "Sauvegarde initiale enregistrée dans $BACKUP_FILE"
@@ -114,7 +115,7 @@ _save_one_target() {
 
     if [[ -r "$path" ]]; then
         val="$(read_sysfs_value "$path")"
-        printf '%s=%q\n' "$name" "$val" >> "$tmp_file"
+        printf '%s=%s\n' "$name" "$val" >> "$tmp_file"
     else
         echo "Avertissement : $name ($path) introuvable ou non lisible, ignoré." >&2
     fi
@@ -140,8 +141,8 @@ _restore_one_target() {
     local name="$1" path="$2" _test_val="$3"
     local saved_val
 
-    if [[ -v "$name" ]]; then
-        saved_val="${!name}"
+    if [[ -n "${SAVED[$name]+x}" ]]; then
+        saved_val="${SAVED[$name]}"
         if [[ -w "$path" ]]; then
             printf '%s\n' "$saved_val" > "$path"
             echo "Restauré $name <- $saved_val"
@@ -156,7 +157,7 @@ _status_one_target() {
     local current_val saved_val
 
     current_val="$(read_sysfs_value "$path")"
-    saved_val="${!name:-<aucun>}"
+    saved_val="${SAVED[$name]:-<aucun>}"
     printf "%-20s %-18s %-18s %s\n" "$name" "$current_val" "$saved_val" "$path"
 }
 
@@ -174,6 +175,7 @@ cmd_restore() {
     # shellcheck disable=SC1090
     source "$BACKUP_FILE"
     for_each_target _restore_one_target
+    rm -f "$BACKUP_FILE"
 }
 
 cmd_status() {
