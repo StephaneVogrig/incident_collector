@@ -2,18 +2,20 @@
 
 Ce document regroupe ce qui est établi, pour reprendre dans une nouvelle discussion sans refaire les mêmes commandes. Faits, déclarations de l'utilisateur et hypothèses sont distingués.
 
-Mise à jour : 27 nov 2026 22:46:00
+Mise à jour : 27 nov 2026 23:59:00 (après lecture du journal Windows et du rapport batterie).
 
 ## Consignes générales
 
 - Une étape, une action à la fois. Attendre le retour de l'utilisateur avant d'enchaîner.
 - Réponses courtes, objectives, sans flatterie. Distinguer faits, consensus, hypothèses. Signaler erreurs, biais et incertitudes.
 - Ne pas proposer plusieurs pistes en même temps. Ne pas redemander ce qui figure ici.
+- Document versionné sous git : mettre à jour par ajouts (nouvelles lignes ou sections), sans réécrire les lignes existantes sauf si elles deviennent fausses.
 
 ## Machine
 
 ASUS ROG Strix G713QM version 1.0, AMD Ryzen 9 5900HX with Radeon Graphics, NVIDIA GeForce RTX 3060 Mobile / Max-Q, iGPU AMD Cezanne.
 Ubuntu 22.04, noyau 6.8.0-138-generic. Sur secteur uniquement (adaptateur secteur d'origine ; son état n'est pas vérifié). BIOS G713QM.331. Double démarrage avec Windows.
+Adaptateur secteur d'origine (étiquette 240 W, 20 V, 12 A), câble et boîtier sans anomalie visible.
 
 ## Problème
 
@@ -61,6 +63,39 @@ Sauvegardes dans `~/stab/` : `grub.orig`, `cmdline.orig`, `etat-origine.txt`, `f
 - **Boot -5 (25 nov, 31 s)** : le journal s'arrête sur des warnings gnome-shell d'initialisation des raccourcis clavier, sans message d'arrêt, `last` le classe « crash ». Cohérent avec un gel ou un reset forcé pendant l'initialisation de la session graphique. Ne prouve rien sur le composant en cause.
 - Noyau : série 6.8 depuis sept. 2024. En 2026, les « crash » courts apparaissent dès les premiers boots sous 6.8.0-107 (après -106, stable en mars-avril), mais aussi sous -111 et -117 (alternés en mai). Détail des blocs noyau disponible dans `wtmp` ; la frontière exacte entre noyaux est incertaine (heures peu fiables).
 - Windows : redémarrages inexpliqués sur batterie en septembre (déclaratif, non daté, aucun log relevé). Aucun vécu sur secteur. Journal Windows non encore lu.
+  - Mise à jour 28 nov : journal Windows lu et rapport batterie obtenu, voir les sections « Événements Windows » et « Batterie et adaptateur secteur » ci-dessous.
+
+## Événements Windows (Id 41 / 6008), lus le 27 nov au soir
+
+Faits (journal System, heure locale ; la date de l'Id 41 est celle du boot qui suit le gel) :
+
+- 14 couples Id 41 (Kernel-Power) / 6008 entre le 13 août et le 13 nov 2026 : 13/08 15:25, 22/08 18:50, 26/08 01:39, 10/09 14:57, 24/09 12:03, 18/10 19:12, 19/10 12:00 / 14:10 / 15:05, 21/10 11:52 / 13:53 / 16:04, 06/11 04:13, 13/11 20:02.
+- Colonne « Bugcheck » des lignes 6008 : c'est l'**heure du dernier arrêt connu**, pas un code.
+- `BugcheckCode` = 0 pour 12 événements sur 14 (pas d'écran bleu). 131073 (0x20001) pour le 19/10 12:00:25 et le 21/10 16:04:55 : **non interprété** (pas un code d'écran bleu courant, non vérifié).
+- `SleepInProgress` = 0 pour les 14 : aucun événement pendant une transition de veille ou de reprise.
+- `PowerButtonTimestamp` renseigné uniquement le 13/08 (FILETIME 134311008962511063, soit environ 15:21:36 locale) : gel suivi d'un appui long, cohérent avec le dernier signe de vie (15:14:22) et le boot (15:25:36). Valeur 0 pour les 13 autres : cela ne prouve ni l'absence d'appui (système figé, l'arrêt forcé peut ne pas être enregistré, hypothèse) ni une coupure spontanée.
+- `Microsoft-Windows-WHEA-Logger` : aucun événement. La commande utilisée avait `-ErrorAction SilentlyContinue`, donc « aucun événement » et « fournisseur absent » ne se distinguent pas. Cohérent avec l'absence de MCE/AER côté Linux ; ne prouve pas que le matériel est sain.
+- Écart dernier signe de vie (6008) → boot (Id 41) : 6 à 25 min pour la plupart (inférence : gel constaté puis reset manuel). Exceptions : 19/10 15:05 (25 s), 26/08 (environ 7 h, 6008 à 18:40 la veille), 06/11 (heure du 6008 : 05:05:04, **postérieure** à l'Id 41 : 04:13:13, incohérence d'horloge, cause inconnue).
+- Le journal Windows ne remonte pas avant le 13/08 dans la sortie (rotation possible, non vérifiée) : l'absence d'événement avant cette date n'est pas une preuve.
+- Aucun événement Windows les 30 sept. et 10-11 oct. (usage de Windows ces jours-là inconnu). La rafale Windows du 18-21 oct. précède d'un jour la rafale Linux du 22-23 oct. (observation, aucune conclusion).
+
+Interprétation (hypothèses) :
+
+- Même signature sous Windows (configuration par défaut) et sous Linux : gel total sans trace, pas de bugcheck, pas de WHEA, pas de lien avec la veille. Les réglages Linux ne sont donc pas la cause racine. Orientation : matériel, firmware ou alimentation (CPU/iGPU, RAM, NVMe, EC, alimentation, thermique), **sans désigner de composant**.
+- Rafales sous Windows (18/10 ×1, 19/10 ×3, 21/10 ×3) comme sous Linux : renforce l'hypothèse de périodes épisodiques (« bonne période ») et réduit la valeur probante de 3 h ou 12 h sans gel sous Linux.
+- Des gels existent sous Windows en août-septembre, période de non-usage de Linux : la machine n'était pas saine à ce moment.
+- Rappel : les événements Windows ne datent que les gels survenus sous Windows.
+
+## Batterie et adaptateur secteur (rapport `powercfg` du 27 nov, 23:33)
+
+- Batterie GA50358 : capacité de conception 90 005 mWh, charge complète 58 872 mWh (65,4 %, usure d'environ 35 %). Cycle count non renseigné.
+- Historique de capacité : baisse régulière de 86,6 k mWh (juin 2022) à environ 61 k (avril 2026), puis 61,0 à 61,6 k jusqu'en juillet, 59,6 k fin sept., 58,9 k mi-nov. **Pas de chute vers le 10-11 avril** : la batterie n'explique pas le déclencheur. Le rapport mesure la capacité, pas la tenue en tension sous charge.
+- Utilisation sur batterie (durée « active » par semaine) : 27 juil.-17 août : 4 h 33 à 6 h 47 ; 28 sept.-5 oct. : 1 min ; 19-26 oct. : 1 h 55 ; 2-9 nov. : 12 min ; autres semaines couvertes : aucune. Aucune donnée du 17 août au 21 sept. (couvre 22/08, 26/08 et 10/09). Du 20 au 27 nov : 100 % secteur.
+- Événements Windows dans une semaine sans usage de la batterie, donc sur secteur : 24/09, 18/10, 13/11. Semaine du 19-26 oct. : 6 événements pour 1 h 55 de batterie, donc au plus 1 ou 2 concernés. 06/11 (04:13) : 12 min de batterie dans la semaine, improbable. 13/08 : semaine avec batterie, état inconnu. Granularité hebdomadaire seulement.
+- Les « redémarrages inexpliqués sur batterie en septembre » (déclaratif) ne sont **pas corroborés** (semaine du 21-28 sept. : aucune batterie ; 17 août-21 sept. : pas de données). Ils ne sont pas non plus contredits.
+- Données corrompues : durée sur secteur de 584 894 h pour la semaine du 5-12 oct. ; capacités agrégées multipliées par 3 (28 sept.-5 oct. : 181 108 / 273 565 mWh) et par 5 (5-12 oct. : 307 056 / 462 088 mWh). Suggère des sauts d'horloge, comme les durées négatives de `wtmp` et l'incohérence du 06/11. Coïncide avec les rafales Linux du 30 sept. et du 10-11 oct. Cause inconnue (pistes non vérifiées : RTC/CMOS, coupures brutales, double démarrage).
+- Adaptateur : fourni avec la machine (déclaratif), étiquette 240 W, 20 V, 12 A, câble et boîtier sans anomalie visible. **Jamais testé électriquement ni remplacé** : non suspect visuellement, non testé.
+- Conséquence : l'hypothèse « coupure sur batterie » n'est pas soutenue pour la majorité des gels. L'alimentation secteur (adaptateur, prise DC, circuits de charge, VRM) reste **non testée**.
 
 ## Essai 0 (base seule) : terminé
 
@@ -102,12 +137,16 @@ Critère : 3 h sans gel, à répéter une fois avant de conclure. Choisi car net
 ## Suite prévue
 
 1. **Maintenant : passage sous Windows.** Lecture des événements : `Get-WinEvent -FilterHashtable @{LogName='System'; Id=41,6008} | Select TimeCreated, Id, @{n='Bugcheck';e={$_.Properties[0].Value}}` (lecture de `Bugcheck` pour l'Id 41 à confirmer sur le résultat). Les dates comptent plus que le code : croiser avec les « crash » Linux (surtout autour du 30 sept. et mai-septembre). Si Windows gèle aussi sans lien avec Linux, les réglages Linux ne sont pas la cause : orienter vers matériel, alimentation, batterie. Les événements Windows ne datent que les gels survenus sous Windows.
+   **Fait** (27 nov au soir) : résultats dans la section « Événements Windows ». Même signature sous Windows, réglages Linux non cause racine, pas de corrélation de dates établie avec les gels Linux.
 2. **Retour sous Linux** : vérifier `uptime -s`, `/proc/cmdline`, `scaling_driver`. Ne pas réappliquer le bloc F. Utiliser la machine avec la configuration A à E sans la modifier. Si gel : noter l'heure et la durée, redémarrer, lire les logs du boot précédent (commandes ci-dessous) **avant** toute modification.
 3. Optionnel, test de contrôle : retour à la base seule pendant plusieurs jours pour voir si les gels reviennent. C'est ce test qui sépare paramètres et bonne période. Non nécessaire si l'objectif est seulement de travailler.
 4. Optionnel, réduire la chaleur : retirer **un** paramètre à la fois (`idle=poll` en premier ; `max_cstate=1` est déjà l'alternative), quelques jours par étape, même critère de charge. Un gel ramène aux logs avant toute autre modification.
 5. Bisection complète (blocs A à E, NTFS compris) seulement si le contrôle ou un retrait fait revenir les gels.
 6. Optionnel : noyau 6.8.0-149 avec la **base seule** (une variable à la fois). Un gel exclurait une régression propre à -136/-138 sans trancher entre matériel et paramètres. Un résultat stable serait ambigu. Retrouver -124 non recommandé.
 7. Optionnel : un essai sans `max_cstate=1` pour valider l'impression d'amélioration.
+8. **Prochaine étape, au retour sous Linux** : état SMART des deux NVMe (commandes ci-dessous, lecture seule). Informatifs : `Critical Warning`, `Media and Data Integrity Errors`, `Error Information Log Entries`, `Percentage Used`. `Unsafe Shutdowns` s'incrémente à chaque coupure non propre, quelle qu'en soit l'origine : il ne dit rien sur la cause.
+9. Optionnel : test avec un autre adaptateur de puissance au moins équivalente, si disponible, plusieurs jours, une seule variable à la fois. C'est le seul test qui tranche l'alimentation secteur ; sinon, piste laissée ouverte.
+10. Si un gel survient sous Windows : relire `PowerBtn` et WHEA pour l'événement concerné (commandes ci-dessous).
 
 ## Hypothèses ouvertes (non établies)
 
@@ -118,6 +157,10 @@ Critère : 3 h sans gel, à répéter une fois avant de conclure. Choisi car net
 - Événement déclencheur vers le 10-11 avril 2026 : **non identifié**.
 - Gels précoces : défaut touchant l'initialisation (GPU/affichage, firmware, bus). Observation : au boot, `01:00.0` est désigné « boot VGA device » par `vgaarb` avant que l'affichage passe par l'iGPU ; aucune conclusion.
 - NVIDIA hors de cause dans ce mode : maintenu, sous réserve de `readlink`/`lsmod` non collés.
+- 28 nov : cause sous les deux OS (matériel, firmware, alimentation) plus probable que les réglages Linux, vu les gels Windows de même signature. Non prouvé, aucun composant désigné.
+- 28 nov : épisodicité des gels (rafales sur les deux OS) : renforce l'alternative « bonne période », ce qui nuance la formulation « affaiblie » ci-dessus.
+- 28 nov : alimentation sur batterie non soutenue (au moins 3 événements Windows sur secteur) ; capacité batterie à 65 % sans chute en avril ; alimentation secteur non testée.
+- 28 nov : anomalies d'horloge (`wtmp`, 06/11 Windows, rapport batterie du 28 sept. au 12 oct.), cause inconnue.
 
 ## Commandes utiles
 
@@ -151,6 +194,24 @@ grep crash ~/stab/last-wtmp1.txt | tail -30
 dpkg -l 'linux-image-6.8*' | grep ^ii
 ```
 
+Windows (PowerShell) :
+
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='System'; Id=41,6008} | Select TimeCreated, Id, @{n='Bugcheck';e={$_.Properties[0].Value}}
+Get-WinEvent -FilterHashtable @{LogName='System'; Id=41} | Select TimeCreated, @{n='Bugcheck';e={$_.Properties[0].Value}}, @{n='Sleep';e={$_.Properties[5].Value}}, @{n='PowerBtn';e={$_.Properties[6].Value}}
+Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-WHEA-Logger'} | Select TimeCreated, Id, LevelDisplayName, Message | Format-List
+powercfg /batteryreport /output "$env:USERPROFILE\batt.html"
+```
+
+Sur les lignes 6008, la colonne « Bugcheck » est en fait l'heure du dernier arrêt connu. Indices de propriétés de l'Id 41 : 0 (BugcheckCode) et 6 (PowerButtonTimestamp) cohérents avec la sortie du 27 nov ; l'indice 5 (SleepInProgress) n'est pas confirmé (valeur 0 partout). Pour WHEA, ne pas ajouter `-ErrorAction SilentlyContinue` (une erreur de fournisseur absent resterait visible).
+
+État SMART des NVMe (Linux, lecture seule ; paquet `smartmontools`) :
+
+```bash
+sudo smartctl -a /dev/nvme0n1 | grep -E 'Model|Critical Warning|Percentage Used|Media and Data|Error Information|Unsafe Shutdowns|Power On Hours|Power Cycles'
+sudo smartctl -a /dev/nvme1n1 | grep -E 'Model|Critical Warning|Percentage Used|Media and Data|Error Information|Unsafe Shutdowns|Power On Hours|Power Cycles'
+```
+
 ## Retour arrière
 
 ```bash
@@ -174,6 +235,8 @@ Si le système ne démarre plus : au démarrage, maintenir Échap (UEFI) pour af
 - Noyau 149 : jamais testé.
 - Cause du retour de `power/control` à `auto` (abandonnée) ; sorties de `readlink` du pilote de `01:00.0` et de `lsmod`.
 - Heure exacte de l'arrêt volontaire du run 1 (26 nov), si utile.
+- **Résolu le 28 nov** : dates et codes des événements Windows Id 41/6008 (voir section dédiée) ; état de la batterie (65 %, cycle count non renseigné) ; adaptateur (240 W conforme à l'étiquette, visuel normal, non testé).
+- Nouveau, ouvert : état SMART des deux NVMe ; interprétation de 131073 ; test avec un autre adaptateur ; cause des sauts d'horloge ; fonctionnement sur secteur ou batterie des événements Windows d'août-septembre (aucune donnée du 17 août au 21 sept.) ; heure de l'arrêt volontaire du run 2.
 
 ## Journal des essais
 
@@ -186,7 +249,7 @@ Si le système ne démarre plus : au démarrage, maintenir Échap (UEFI) pour af
 
 ## En cours
 
-Session Linux du 27 nov toujours sans gel à 22:29. L'utilisateur passe sous Windows (arrêt volontaire). Prochaine étape : lecture des événements Windows (Suite prévue, point 1).
+Session Linux du 27 nov sans gel jusqu'à l'arrêt volontaire prévu (heure non notée). Journal Windows et rapport batterie lus le 27 nov au soir (voir sections dédiées). Prochaine étape : retour sous Linux, vérifications habituelles, puis état SMART des NVMe (Suite prévue, point 8).
 
 ## Consignes pour la suite
 
